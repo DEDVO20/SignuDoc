@@ -299,6 +299,10 @@ type FieldRow = {
   y: number;
 };
 
+// Fields shown in the envelope detail per-signer summary ("N fields assigned"
+// / "N fields completed"). Includes auto-filled Date and Name fields so the
+// count matches Place fields and Review; the signing page's remaining-required
+// counter tracks interactive signer actions separately.
 function shouldCountFieldForSignerSummary(
   field: Pick<FieldRecord, "required" | "type">,
 ): boolean {
@@ -307,6 +311,8 @@ function shouldCountFieldForSignerSummary(
   }
 
   if (
+    field.type === "date" ||
+    field.type === "name" ||
     field.type === "text" ||
     field.type === "number" ||
     field.type === "dropdown"
