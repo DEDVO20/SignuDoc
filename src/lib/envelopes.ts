@@ -3020,7 +3020,6 @@ export async function sendDraftEnvelope(
   }
 
   const sentAt = Math.floor(Date.now() / 1000);
-  const sentAuditAt = Math.max(sentAt, envelope.createdAt + 1);
   const expiresAt = deadlineFromDays(sentAt, input.expiresInDays);
   const issuedLinks = new Map<string, IssuedSigningLink>();
 
@@ -3207,7 +3206,10 @@ export async function sendDraftEnvelope(
         {
           actorEmail: input.senderEmail,
           actorType: "sender",
-          createdAt: sentAuditAt,
+          // Keep the sent audit timestamp equal to envelopes.sent_at; tied
+          // whole-second events (created, sent, email_sent) stay ordered by
+          // audit_events.sequence rather than bumping sent past email_sent.
+          createdAt: sentAt,
           envelopeId,
           event: "sent",
           ipAddress: input.ipAddress ?? null,
@@ -3361,7 +3363,7 @@ export async function sendDraftEnvelope(
               SELECT max(sequence) FROM audit_events WHERE envelope_id = $1
             )
         `,
-        [envelopeId, sentAuditAt, input.senderEmail],
+        [envelopeId, sentAt, input.senderEmail],
       );
       // The envelope.sent webhook was held for the invitation (see
       // releaseSentWebhook below); it did not go out, so there is nothing
