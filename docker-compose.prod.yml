@@ -22,9 +22,9 @@ services:
       SETUP_TOKEN: ${SETUP_TOKEN:?Required}
       RETENTION_JOB_SECRET: ${RETENTION_JOB_SECRET:?Required}
 
-      EMAIL_DRIVER: ${EMAIL_DRIVER:-capture}
-      RESEND_API_KEY: ${RESEND_API_KEY:-}
-      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-}
+      EMAIL_DRIVER: resend
+      RESEND_API_KEY: ${RESEND_API_KEY:?Required}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:?Required}
 
       STORAGE_DRIVER: local
       STORAGE_LOCAL_DIR: /app/.data/storage
