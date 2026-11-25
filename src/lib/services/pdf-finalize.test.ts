@@ -1659,3 +1659,343 @@ test("touching side-by-side Part 11 signatures with long unbroken names keep a c
   assert.ok(firstSpaced.includes("2026-11-22 14:30:00 UTC"), firstSpaced);
   assert.ok(firstSpaced.includes("Meaning: Responsibility"), firstSpaced);
 });
+
+function assertNoOverlapWithFieldBoxes(
+  items: readonly ExtractedTextItem[],
+  fields: readonly FieldRecord[],
+  label: string,
+) {
+  for (const item of items) {
+    const itemBottom = item.y;
+    const itemTop = item.y + item.height;
+
+    for (const field of fields) {
+      const fieldLeft = field.x * LETTER_PAGE.widthPt;
+      const fieldRight = (field.x + field.width) * LETTER_PAGE.widthPt;
+      const fieldTop = LETTER_PAGE.heightPt - field.y * LETTER_PAGE.heightPt;
+      const fieldBottom = fieldTop - field.height * LETTER_PAGE.heightPt;
+      const overlaps =
+        item.left < fieldRight &&
+        item.right > fieldLeft &&
+        itemBottom < fieldTop &&
+        itemTop > fieldBottom;
+
+      assert.equal(
+        overlaps,
+        false,
+        `${label} ("${item.text}" [${item.left.toFixed(2)}..${item.right.toFixed(2)}, ${itemBottom.toFixed(2)}..${itemTop.toFixed(2)}]) enters field "${field.id}" [${fieldLeft.toFixed(2)}..${fieldRight.toFixed(2)}, ${fieldBottom.toFixed(2)}..${fieldTop.toFixed(2)}]`,
+      );
+    }
+  }
+}
+
+test("a right-edge Part 11 signature sandwiched between date fields shifts left instead of covering them", async () => {
+  const signedAt = Date.UTC(2026, 10, 22, 14, 30, 0) / 1000;
+  const longName = "Alice Alexander Example-Smythe-Montgomery";
+  const extraFields: FieldRecord[] = [
+    {
+      createdAt: signedAt - 500,
+      envelopeId: "envelope-1",
+      height: 0.03,
+      id: "date-below",
+      page: 1,
+      required: true,
+      signerId: "part11-signer-1",
+      submittedAt: signedAt,
+      type: "date",
+      updatedAt: signedAt,
+      value: "2026-11-22",
+      width: 0.24,
+      x: 0.72,
+      y: 0.585,
+    },
+    {
+      createdAt: signedAt - 500,
+      envelopeId: "envelope-1",
+      height: 0.05,
+      id: "date-above",
+      page: 1,
+      required: true,
+      signerId: "part11-signer-1",
+      submittedAt: signedAt,
+      type: "date",
+      updatedAt: signedAt,
+      value: "2026-11-21",
+      width: 0.24,
+      x: 0.72,
+      y: 0.445,
+    },
+  ];
+  const items = await renderPart11Scenario({
+    extraFields,
+    signatures: [
+      {
+        height: 0.07,
+        id: "sig-sandwiched-right",
+        meaning: "approval",
+        name: longName,
+        width: 0.24,
+        x: 0.72,
+        y: 0.5,
+      },
+    ],
+  });
+  const dateItems = items.filter(
+    (item) => item.text === "2026-11-22" || item.text === "2026-11-21",
+  );
+  const manifestationItems = items.filter(
+    (item) =>
+      item.height <= 7 &&
+      item.text !== "2026-11-22" &&
+      item.text !== "2026-11-21",
+  );
+  const signatureItems = items.filter(
+    (item) =>
+      item.height > 7 &&
+      item.text !== "2026-11-22" &&
+      item.text !== "2026-11-21",
+  );
+
+  assert.equal(dateItems.length, 2);
+  assert.ok(manifestationItems.length >= 1);
+
+  for (const item of manifestationItems) {
+    assertItemInsideLetterPage(item);
+    assert.ok(
+      item.height >= 5,
+      `"${item.text}" shrunk below readable size (${item.height})`,
+    );
+  }
+
+  assertNoOverlapWithFieldBoxes(
+    manifestationItems,
+    extraFields,
+    "Sandwiched right manifestation",
+  );
+  assertNoPairwiseOverlap([
+    { items: manifestationItems, label: "Sandwiched right manifestation" },
+    { items: signatureItems, label: "Sandwiched signature value" },
+    { items: dateItems, label: "Adjacent date fields" },
+  ]);
+
+  const joined = manifestationItems
+    .map((item) => item.text)
+    .join(" ")
+    .replace(/\s+/g, " ");
+
+  assert.ok(joined.includes(`Signed by ${longName}`), joined);
+  assert.ok(joined.includes("2026-11-22 14:30:00 UTC"), joined);
+  assert.ok(joined.includes("Meaning: Approval"), joined);
+});
+
+test("a Part 11 signature boxed in horizontally and vertically fits in collision-free space without covering fields", async () => {
+  const signedAt = Date.UTC(2026, 10, 22, 14, 30, 0) / 1000;
+  const longName = "Alice Alexander Example-Smythe-Montgomery";
+  const extraFields: FieldRecord[] = [
+    // Blocks shifting left AND blocks placing beside on the left.
+    {
+      createdAt: signedAt - 500,
+      envelopeId: "envelope-1",
+      height: 0.2,
+      id: "text-left-blocker",
+      page: 1,
+      required: true,
+      signerId: "part11-signer-1",
+      submittedAt: signedAt,
+      type: "text",
+      updatedAt: signedAt,
+      value: "LEFT",
+      width: 0.65,
+      x: 0.04,
+      y: 0.44,
+    },
+    // Blocks directly below with an ~11.88 pt vertical gap.
+    {
+      createdAt: signedAt - 500,
+      envelopeId: "envelope-1",
+      height: 0.03,
+      id: "date-boxed-below",
+      page: 1,
+      required: true,
+      signerId: "part11-signer-1",
+      submittedAt: signedAt,
+      type: "date",
+      updatedAt: signedAt,
+      value: "2026-11-22",
+      width: 0.24,
+      x: 0.72,
+      y: 0.585,
+    },
+    // Blocks directly above with a ~3.96 pt vertical gap.
+    {
+      createdAt: signedAt - 500,
+      envelopeId: "envelope-1",
+      height: 0.05,
+      id: "date-boxed-above",
+      page: 1,
+      required: true,
+      signerId: "part11-signer-1",
+      submittedAt: signedAt,
+      type: "date",
+      updatedAt: signedAt,
+      value: "2026-11-21",
+      width: 0.24,
+      x: 0.72,
+      y: 0.445,
+    },
+  ];
+  const items = await renderPart11Scenario({
+    extraFields,
+    signatures: [
+      {
+        height: 0.07,
+        id: "sig-boxed",
+        meaning: "approval",
+        name: longName,
+        width: 0.24,
+        x: 0.72,
+        y: 0.5,
+      },
+    ],
+  });
+  const fieldItems = items.filter(
+    (item) =>
+      item.text === "2026-11-22" ||
+      item.text === "2026-11-21" ||
+      item.text === "LEFT",
+  );
+  const manifestationItems = items.filter(
+    (item) => item.height <= 7 && !fieldItems.includes(item),
+  );
+  const signatureItems = items.filter(
+    (item) => item.height > 7 && !fieldItems.includes(item),
+  );
+
+  assert.equal(fieldItems.length, 3);
+  assert.ok(manifestationItems.length >= 1);
+
+  for (const item of manifestationItems) {
+    assertItemInsideLetterPage(item);
+  }
+
+  assertNoOverlapWithFieldBoxes(
+    manifestationItems,
+    extraFields,
+    "Boxed manifestation",
+  );
+  assertNoPairwiseOverlap([
+    { items: manifestationItems, label: "Boxed manifestation" },
+    { items: signatureItems, label: "Boxed signature value" },
+    { items: fieldItems, label: "Surrounding fields" },
+  ]);
+
+  const joined = manifestationItems
+    .map((item) => item.text)
+    .join(" ")
+    .replace(/\s+/g, " ");
+
+  assert.ok(joined.includes(`Signed by ${longName}`), joined);
+  assert.ok(joined.includes("2026-11-22 14:30:00 UTC"), joined);
+  assert.ok(joined.includes("Meaning: Approval"), joined);
+});
+
+test("a Part 11 signature touched directly above and below places its manifestation beside the box", async () => {
+  const signedAt = Date.UTC(2026, 10, 22, 14, 30, 0) / 1000;
+  const longName = "Alice Alexander Example-Smythe";
+  const extraFields: FieldRecord[] = [
+    // Touches bottom edge of signature (y = 0.5 + 0.07 = 0.57, 0 pt gap).
+    {
+      createdAt: signedAt - 500,
+      envelopeId: "envelope-1",
+      height: 0.04,
+      id: "date-touch-below",
+      page: 1,
+      required: true,
+      signerId: "part11-signer-1",
+      submittedAt: signedAt,
+      type: "date",
+      updatedAt: signedAt,
+      value: "2026-11-22",
+      width: 0.24,
+      x: 0.72,
+      y: 0.57,
+    },
+    // Touches top edge of signature (y + h = 0.46 + 0.04 = 0.50, 0 pt gap).
+    {
+      createdAt: signedAt - 500,
+      envelopeId: "envelope-1",
+      height: 0.04,
+      id: "date-touch-above",
+      page: 1,
+      required: true,
+      signerId: "part11-signer-1",
+      submittedAt: signedAt,
+      type: "date",
+      updatedAt: signedAt,
+      value: "2026-11-21",
+      width: 0.24,
+      x: 0.72,
+      y: 0.46,
+    },
+  ];
+  const items = await renderPart11Scenario({
+    extraFields,
+    signatures: [
+      {
+        height: 0.07,
+        id: "sig-touch-vertical",
+        meaning: "review",
+        name: longName,
+        width: 0.24,
+        x: 0.72,
+        y: 0.5,
+      },
+    ],
+  });
+  const dateItems = items.filter(
+    (item) => item.text === "2026-11-22" || item.text === "2026-11-21",
+  );
+  const manifestationItems = items.filter(
+    (item) =>
+      item.height <= 7 &&
+      item.text !== "2026-11-22" &&
+      item.text !== "2026-11-21",
+  );
+  const signatureItems = items.filter(
+    (item) =>
+      item.height > 7 &&
+      item.text !== "2026-11-22" &&
+      item.text !== "2026-11-21",
+  );
+
+  assert.equal(dateItems.length, 2);
+  assert.ok(manifestationItems.length >= 1);
+
+  for (const item of manifestationItems) {
+    assertItemInsideLetterPage(item);
+    assert.ok(
+      item.height >= 5,
+      `"${item.text}" shrunk below readable size (${item.height})`,
+    );
+  }
+
+  assertNoOverlapWithFieldBoxes(
+    manifestationItems,
+    extraFields,
+    "Beside manifestation",
+  );
+  assertNoPairwiseOverlap([
+    { items: manifestationItems, label: "Beside manifestation" },
+    { items: signatureItems, label: "Vertically touched signature value" },
+    { items: dateItems, label: "Touching date fields" },
+  ]);
+
+  const joined = manifestationItems
+    .map((item) => item.text)
+    .join(" ")
+    .replace(/\s+/g, " ");
+
+  assert.ok(joined.includes(`Signed by ${longName}`), joined);
+  assert.ok(joined.includes("2026-11-22 14:30:00 UTC"), joined);
+  assert.ok(joined.includes("Meaning: Review"), joined);
+});

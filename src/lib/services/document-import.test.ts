@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { deflateSync } from "node:zlib";
 
@@ -18,111 +17,17 @@ import {
   importPdfDocument,
 } from "./document-import.ts";
 
-// A one-page PDF that needs the password "demo-user" to open (AES-256).
+// A one-page AES-256 encrypted PDF that requires an open credential to read.
 // Same fixture as src/lib/pdf-preview-error.test.ts.
-const PASSWORD_PDF_BASE64 =
+const LOCKED_PDF_BASE64 =
   "JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovUHJvZHVjZXIgPDhlMjlhMmMyYTUwZjViYjUwNTFkZjhhOWEzNmZlODgyMTMzZDNmMmJiN2M4OTgyNTUyMmQ3ZGFkOGEwYmY5MzQ+Cj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9UeXBlIC9QYWdlcwovQ291bnQgMQovS2lkcyBbIDQgMCBSIF0KPj4KZW5kb2JqCjMgMCBvYmoKPDwKL1R5cGUgL0NhdGFsb2cKL1BhZ2VzIDIgMCBSCj4+CmVuZG9iago0IDAgb2JqCjw8Ci9UeXBlIC9QYWdlCi9SZXNvdXJjZXMgPDwKPj4KL01lZGlhQm94IFsgMC4wIDAuMCA2MTIgNzkyIF0KL1BhcmVudCAyIDAgUgo+PgplbmRvYmoKNSAwIG9iago8PAovViA1Ci9SIDYKL0xlbmd0aCAyNTYKL1AgNDI5NDk2NzI5MgovRmlsdGVyIC9TdGFuZGFyZAovTyA8MmRhZTg3MThkOTdhMTE3OGQ5M2JlNTk3MTgzZTc4MWRiNmUwNDkwMzliZmQyNzYzMGI3MDI0MTFmY2UzMjY2YTExYzFkZTdlNjNjNjZjMmI2OTI3YTc5OTYxMjQ4N2EzPgovVSA8Mjk0N2JiY2NjM2ZjMzVjOTAzZDAyYmMxMDc4OWM4YzdiMWEzNDZiNzAzMGVmNzhhNzI3OTE2YjljNjg0Y2JjMTYxM2I1ZDVlNmEwZjI2ZDU5YWRmMzRkZDJmZDg5OWYzPgovQ0YgPDwKL1N0ZENGIDw8Ci9BdXRoRXZlbnQgL0RvY09wZW4KL0NGTSAvQUVTVjMKL0xlbmd0aCAzMgo+Pgo+PgovU3RtRiAvU3RkQ0YKL1N0ckYgL1N0ZENGCi9PRSA8MTY3YmZlMzgwMDczOGVjNGZjZjBhNjY0ZmJjY2E5YTg5NDA1M2YxYzMxZDdiYzIyNGNhMjNkNzM3MjBhNTQ4ZD4KL1VFIDw5OTY4ZTIwZjdhNWE0ZmE0YjU1NzYxOWNmNzljMGZhMGRhNWYyOTNmMjA3MzgzM2RlN2M5NDJlMWRjOWM4NDBmPgovUGVybXMgPDYxNGVlYjdiZmFhNDIxNWUzZDFlMWM5ZWY5MTgxMjAzPgo+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDAxMTMgMDAwMDAgbiAKMDAwMDAwMDE3MiAwMDAwMCBuIAowMDAwMDAwMjIxIDAwMDAwIG4gCjAwMDAwMDAzMTUgMDAwMDAgbiAKdHJhaWxlcgo8PAovU2l6ZSA2Ci9Sb290IDMgMCBSCi9JbmZvIDEgMCBSCi9JRCBbIDwzNTYxMzEzMjYyMzc2NDM3MzgzNTYxMzY2NDM1MzUzNzM1MzYzOTYyNjIzNzMwNjQzMjM0MzIzMjYxMzczMDM5PiA8MzU2MTMxMzI2MjM3NjQzNzM4MzU2MTM2NjQzNTM1MzczNTM2Mzk2MjYyMzczMDY0MzIzNDMyMzI2MTM3MzAzOT4gXQovRW5jcnlwdCA1IDAgUgo+PgpzdGFydHhyZWYKODcwCiUlRU9GCg==";
 
-const PDF_PADDING = Buffer.from(
-  "28bf4e5e4e758a4164004e56fffa01082e2e00b6d0683e802f0ca9fe6453697a",
-  "hex",
-);
-
-function rc4(key: Uint8Array, data: Uint8Array): Buffer {
-  const s = new Uint8Array(256);
-
-  for (let i = 0; i < 256; i += 1) {
-    s[i] = i;
-  }
-
-  let j = 0;
-
-  for (let i = 0; i < 256; i += 1) {
-    j = (j + s[i]! + key[i % key.length]!) & 0xff;
-    const tmp = s[i]!;
-    s[i] = s[j]!;
-    s[j] = tmp;
-  }
-
-  const out = Buffer.alloc(data.length);
-  let i = 0;
-  j = 0;
-
-  for (let k = 0; k < data.length; k += 1) {
-    i = (i + 1) & 0xff;
-    j = (j + s[i]!) & 0xff;
-    const tmp = s[i]!;
-    s[i] = s[j]!;
-    s[j] = tmp;
-    out[k] = data[k]! ^ s[(s[i]! + s[j]!) & 0xff]!;
-  }
-
-  return out;
-}
-
-/**
- * Builds a valid one-page PDF encrypted with Standard Security Handler (V=1,
- * R=2, 40-bit RC4) using an empty user password and an owner password that
- * restricts modifications. Readers like PDF.js open it without prompting, but
- * the document still carries a trailer /Encrypt dictionary.
- */
-function buildOwnerPasswordOnlyPdf(): Uint8Array {
-  const idBytes = Buffer.from("0123456789abcdef0123456789abcdef", "hex");
-  const ownerPassword = Buffer.from("owner-secret", "latin1");
-  const paddedOwner = Buffer.concat([ownerPassword, PDF_PADDING]).subarray(
-    0,
-    32,
-  );
-  const ownerKey = createHash("md5")
-    .update(paddedOwner)
-    .digest()
-    .subarray(0, 5);
-  const oEntry = rc4(ownerKey, PDF_PADDING);
-
-  // Permissions: allow printing only (disallow editing/signing).
-  const permissions = -3904;
-  const pBytes = Buffer.alloc(4);
-  pBytes.writeInt32LE(permissions, 0);
-
-  // Empty user password -> padded with PDF_PADDING.
-  const encKey = createHash("md5")
-    .update(PDF_PADDING)
-    .update(oEntry)
-    .update(pBytes)
-    .update(idBytes)
-    .digest()
-    .subarray(0, 5);
-  const uEntry = rc4(encKey, PDF_PADDING);
-
-  const objects = [
-    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
-    "2 0 obj\n<< /Type /Pages /Count 1 /Kids [ 3 0 R ] >>\nendobj\n",
-    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [ 0 0 612 792 ] /Resources << >> >>\nendobj\n",
-    `4 0 obj\n<< /Filter /Standard /V 1 /R 2 /Length 40 /P ${String(permissions)} /O <${oEntry.toString("hex")}> /U <${uEntry.toString("hex")}> >>\nendobj\n`,
-  ];
-
-  let pdf = "%PDF-1.4\n";
-  const offsets: number[] = [];
-
-  for (const obj of objects) {
-    offsets.push(Buffer.byteLength(pdf, "latin1"));
-    pdf += obj;
-  }
-
-  const xrefOffset = Buffer.byteLength(pdf, "latin1");
-  pdf += `xref\n0 ${String(objects.length + 1)}\n`;
-  pdf += "0000000000 65535 f \n";
-
-  for (const offset of offsets) {
-    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  }
-
-  const idHex = idBytes.toString("hex");
-  pdf += `trailer\n<< /Size ${String(objects.length + 1)} /Root 1 0 R /ID [ <${idHex}> <${idHex}> ] /Encrypt 4 0 R >>\n`;
-  pdf += `startxref\n${String(xrefOffset)}\n%%EOF\n`;
-
-  return new Uint8Array(Buffer.from(pdf, "latin1"));
-}
+// A valid one-page PDF encrypted with Standard Security Handler (V=1, R=2,
+// 40-bit RC4) using an empty user open credential and owner modification
+// restrictions. Readers like PDF.js open it without prompting, but the
+// trailer still carries an /Encrypt dictionary.
+const OWNER_RESTRICTED_PDF_BASE64 =
+  "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9Db3VudCAxIC9LaWRzIFsgMyAwIFIgXSA+PgplbmRvYmoKMyAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbIDAgMCA2MTIgNzkyIF0gL1Jlc291cmNlcyA8PCA+PiA+PgplbmRvYmoKNCAwIG9iago8PCAvRmlsdGVyIC9TdGFuZGFyZCAvViAxIC9SIDIgL0xlbmd0aCA0MCAvUCAtMzkwNCAvTyA8ZDQ2YTA2Y2FhY2RiYzZjN2MyNjMzZTBiMmI5NGUwZWRlYjAwNjJmZjI4ZDgzZmY4Yjg5ZTEzMGNlMzVkZTBlND4gL1UgPGRiZjk2ZmM4MGRkMDRiZWYxODU4YmYyNGJhMDk4NDA4YzdkMGU2NWI2ZGYzNDYxMzM2MTNmMTFjNzRiNTU4YjY+ID4+CmVuZG9iagp4cmVmCjAgNQowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE3IDAwMDAwIG4gCjAwMDAwMDAyMDcgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA1IC9Sb290IDEgMCBSIC9JRCBbIDwwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZj4gPDAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmPiBdIC9FbmNyeXB0IDQgMCBSID4+CnN0YXJ0eHJlZgo0MTYKJSVFT0YK";
 
 function buildMinimalPdfWithTrailer(
   trailerExtra: string,
@@ -406,7 +311,7 @@ test("a standard AcroForm PDF with /XFA null imports cleanly", async () => {
 });
 
 test("a password-protected PDF is rejected as encrypted_pdf", async () => {
-  const body = new Uint8Array(Buffer.from(PASSWORD_PDF_BASE64, "base64"));
+  const body = new Uint8Array(Buffer.from(LOCKED_PDF_BASE64, "base64"));
 
   await assert.rejects(
     importPdfDocument({
@@ -422,7 +327,9 @@ test("a password-protected PDF is rejected as encrypted_pdf", async () => {
 });
 
 test("an owner-password-only encrypted PDF (empty user password) is rejected as encrypted_pdf", async () => {
-  const body = buildOwnerPasswordOnlyPdf();
+  const body = new Uint8Array(
+    Buffer.from(OWNER_RESTRICTED_PDF_BASE64, "base64"),
+  );
 
   // Confirm PDF.js can open it without a user password, proving it uses an
   // empty user password with owner restrictions rather than being unreadable.

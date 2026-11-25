@@ -916,6 +916,7 @@ type PlacedManifestation = {
   collidesWithManifestation: boolean;
   fitsOnPage: boolean;
   hasCollision: boolean;
+  hasDirectOverlap: boolean;
   lineHeight: number;
   lines: string[];
   size: number;
@@ -999,20 +1000,17 @@ function layoutManifestationText(
   const parts = text.split(" | ");
 
   // One line when it fits at a readable size, preserving the single-line
-  // manifestation whenever there is horizontal room.
-  const oneLineSize = fitTextSize(
-    font,
-    text,
-    maxWidth,
-    7,
-    MANIFESTATION_PREFERRED_SIZE_PT,
-  );
-
-  if (oneLineSize >= MANIFESTATION_MIN_READABLE_SIZE_PT) {
+  // manifestation whenever there is horizontal (and when constrained,
+  // vertical) room.
+  for (
+    let size = MANIFESTATION_PREFERRED_SIZE_PT;
+    size >= MANIFESTATION_MIN_READABLE_SIZE_PT;
+    size -= 0.5
+  ) {
     const candidate = measureManifestationLayout(
       font,
       [text],
-      oneLineSize,
+      size,
       maxWidth,
       maxHeight,
     );
@@ -1024,17 +1022,15 @@ function layoutManifestationText(
 
   // One line per part (name, UTC time, meaning) when every part fits whole
   // inside maxWidth at a readable size.
-  const partsSize = Math.min(
-    ...parts.map((part) =>
-      fitTextSize(font, part, maxWidth, 7, MANIFESTATION_PREFERRED_SIZE_PT),
-    ),
-  );
-
-  if (partsSize >= MANIFESTATION_MIN_READABLE_SIZE_PT) {
+  for (
+    let size = MANIFESTATION_PREFERRED_SIZE_PT;
+    size >= MANIFESTATION_MIN_READABLE_SIZE_PT;
+    size -= 0.5
+  ) {
     const candidate = measureManifestationLayout(
       font,
       parts,
-      partsSize,
+      size,
       maxWidth,
       maxHeight,
     );
@@ -1100,6 +1096,21 @@ function layoutManifestationText(
     size >= 0.01;
     size = size > MANIFESTATION_LAST_RESORT_SIZE_PT ? size - 0.5 : size / 2
   ) {
+    const singleLine = measureManifestationLayout(
+      font,
+      [text],
+      size,
+      maxWidth,
+      maxHeight,
+    );
+
+    if (
+      singleLine.fitsWidth &&
+      (!allowVerticalShrink || singleLine.fitsHeight)
+    ) {
+      return singleLine;
+    }
+
     const wrapped = parts.flatMap((part) =>
       wrapFieldText(font, size, maxWidth, part),
     );
@@ -1119,6 +1130,25 @@ function layoutManifestationText(
   }
 
   return fallback;
+}
+
+function pickLargestFittingCandidate(
+  candidates: ReadonlyArray<PlacedManifestation | null>,
+  predicate: (candidate: PlacedManifestation) => boolean,
+): PlacedManifestation | null {
+  let best: PlacedManifestation | null = null;
+
+  for (const candidate of candidates) {
+    if (!candidate || !predicate(candidate)) {
+      continue;
+    }
+
+    if (!best || candidate.size > best.size) {
+      best = candidate;
+    }
+  }
+
+  return best;
 }
 
 /**
@@ -1155,49 +1185,120 @@ function layoutPageManifestations(
 
   for (const target of ordered) {
     const { field, rect, text } = target;
+    const ownBox = rectToPageBox(rect);
     const otherFieldBoxes = allFieldBoxes
       .filter((entry) => entry.field !== field)
       .map((entry) => entry.box);
     const blockers = [...otherFieldBoxes, ...placedBoxes];
-    const x = Math.max(
+    const xAnchor = Math.max(
       margin,
       Math.min(rect.xPt, Math.max(margin, pageRight - 4)),
     );
     const spaceBelow = Math.max(0, rect.yPt - margin);
     const spaceAbove = Math.max(0, pageTop - (rect.yPt + rect.heightPt));
 
+    const buildPlacement = (
+      x: number,
+      topBaseline: number,
+      layout: ManifestationTextLayout,
+      fitsVertically: boolean,
+    ): PlacedManifestation => {
+      const descender = layout.size * 0.25;
+      const finalBottomBaseline =
+        topBaseline - (layout.lines.length - 1) * layout.lineHeight;
+      const box: PageBox = {
+        bottom: finalBottomBaseline - descender,
+        left: x,
+        right: x + layout.maxLineWidth,
+        top: topBaseline + layout.size,
+      };
+      const collidesWithManifestation = placedBoxes.some((blocker) =>
+        boxesOverlap(box, blocker, 0, MANIFESTATION_VERTICAL_CLEARANCE_PT),
+      );
+      const collidesWithField = otherFieldBoxes.some((blocker) =>
+        boxesOverlap(box, blocker, 0, MANIFESTATION_VERTICAL_CLEARANCE_PT),
+      );
+      const collidesWithOwnField = boxesOverlap(box, ownBox, 0, 0);
+      const hasCollision =
+        collidesWithManifestation || collidesWithField || collidesWithOwnField;
+      const hasDirectOverlap =
+        collidesWithOwnField ||
+        placedBoxes.some((blocker) => boxesOverlap(box, blocker, 0, 0)) ||
+        otherFieldBoxes.some((blocker) => boxesOverlap(box, blocker, 0, 0));
+
+      return {
+        box,
+        collidesWithManifestation,
+        fitsOnPage:
+          fitsVertically &&
+          box.left >= margin - 0.01 &&
+          box.right <= pageRight + 0.01 &&
+          box.bottom >= margin - 0.01 &&
+          box.top <= pageTop + 0.01,
+        hasCollision,
+        hasDirectOverlap,
+        lineHeight: layout.lineHeight,
+        lines: layout.lines,
+        size: layout.size,
+        topBaseline,
+        x,
+      };
+    };
+
     const layoutAtSide = (
       side: "below" | "above",
-      allowVerticalShrink: boolean,
+      options: {
+        allowVerticalShrink: boolean;
+        constrainToVerticalBlockers?: boolean;
+        shiftLeft?: boolean;
+        verticalClearance?: number;
+      },
     ): PlacedManifestation => {
-      const availableHeight = side === "below" ? spaceBelow : spaceAbove;
+      const { allowVerticalShrink } = options;
+      const constrainToVerticalBlockers =
+        options.constrainToVerticalBlockers ?? false;
+      const shiftLeft = options.shiftLeft ?? false;
+      const verticalClearance =
+        options.verticalClearance ?? MANIFESTATION_VERTICAL_CLEARANCE_PT;
+      let leftBound = shiftLeft ? margin : xAnchor;
       let rightBound = pageRight;
+      let verticalLimit = side === "below" ? spaceBelow : spaceAbove;
       let current!: PlacedManifestation;
+      const maxPasses = blockers.length * 3 + 2;
 
-      // Each pass that finds a right-side blocker strictly lowers rightBound
-      // against a finite set of blocker left-edges, so this reaches a fixed
-      // point in at most blockers.length + 1 passes.
-      for (let pass = 0; pass <= blockers.length; pass += 1) {
-        const maxWidth = Math.max(0.5, rightBound - x);
+      // Each pass strictly tightens at least one horizontal or vertical bound
+      // against a finite blocker edge, so this always reaches a fixed point.
+      for (let pass = 0; pass < maxPasses; pass += 1) {
+        const maxWidth = Math.max(0.5, rightBound - leftBound);
         const layout = layoutManifestationText(
           font,
           text,
           maxWidth,
-          availableHeight,
+          Math.max(0, verticalLimit),
           { allowVerticalShrink },
         );
+        const x = shiftLeft
+          ? Math.max(
+              leftBound,
+              Math.min(xAnchor, rightBound - layout.maxLineWidth),
+            )
+          : xAnchor;
         const descender = layout.size * 0.25;
         const gap = layout.lineHeight - layout.size;
         let topBaseline: number;
-        let fitsOnPage: boolean;
+        let fitsVertically: boolean;
 
         if (side === "below") {
           topBaseline = rect.yPt - layout.lineHeight;
           const bottomBaseline =
             topBaseline - (layout.lines.length - 1) * layout.lineHeight;
 
-          fitsOnPage = bottomBaseline - descender >= margin;
-          if (!fitsOnPage && allowVerticalShrink) {
+          fitsVertically = bottomBaseline - descender >= margin;
+          if (
+            !fitsVertically &&
+            allowVerticalShrink &&
+            !constrainToVerticalBlockers
+          ) {
             const shiftUp = margin - (bottomBaseline - descender);
 
             topBaseline = Math.min(
@@ -1210,105 +1311,357 @@ function layoutPageManifestations(
 
           topBaseline =
             bottomBaseline + (layout.lines.length - 1) * layout.lineHeight;
-          fitsOnPage = topBaseline + layout.size <= pageTop;
+          fitsVertically = topBaseline + layout.size <= pageTop;
 
-          if (!fitsOnPage) {
+          if (!fitsVertically && !constrainToVerticalBlockers) {
             topBaseline = Math.min(topBaseline, pageTop - layout.size);
           }
         }
 
-        const finalBottomBaseline =
-          topBaseline - (layout.lines.length - 1) * layout.lineHeight;
-        const box: PageBox = {
-          bottom: finalBottomBaseline - descender,
-          left: x,
-          right: x + layout.maxLineWidth,
-          top: topBaseline + layout.size,
-        };
+        current = buildPlacement(x, topBaseline, layout, fitsVertically);
 
+        let nextLeftBound = leftBound;
         let nextRightBound = rightBound;
+        let nextVerticalLimit = verticalLimit;
 
         for (const blocker of blockers) {
           const isRightSideBlocker =
-            blocker.left > x &&
+            blocker.left > xAnchor &&
             (blocker.left >= rect.xPt + rect.widthPt - 1 ||
-              blocker.left - x >= 24);
+              blocker.left - xAnchor >= 24);
 
           if (
             isRightSideBlocker &&
             boxesOverlap(
-              box,
+              current.box,
               blocker,
               MANIFESTATION_GUTTER_PT,
-              MANIFESTATION_VERTICAL_CLEARANCE_PT,
+              verticalClearance,
             )
           ) {
             const gutter = Math.min(
               MANIFESTATION_GUTTER_PT,
-              (blocker.left - x) * 0.25,
+              (blocker.left - xAnchor) * 0.25,
             );
             const candidateBound = blocker.left - gutter;
 
             if (candidateBound < nextRightBound) {
               nextRightBound = candidateBound;
             }
+            continue;
+          }
+
+          if (
+            shiftLeft &&
+            blocker.right <= xAnchor + 0.01 &&
+            boxesOverlap(
+              current.box,
+              blocker,
+              MANIFESTATION_GUTTER_PT,
+              verticalClearance,
+            )
+          ) {
+            const gutter = Math.min(
+              MANIFESTATION_GUTTER_PT,
+              (xAnchor - blocker.right) * 0.25,
+            );
+            const candidateLeft = Math.min(xAnchor, blocker.right + gutter);
+
+            if (candidateLeft > nextLeftBound) {
+              nextLeftBound = candidateLeft;
+            }
+            continue;
+          }
+
+          if (
+            constrainToVerticalBlockers &&
+            boxesOverlap(current.box, blocker, 0, verticalClearance)
+          ) {
+            if (side === "below" && blocker.top <= rect.yPt + 0.01) {
+              const candidateHeight = Math.max(
+                0,
+                rect.yPt - (blocker.top + verticalClearance),
+              );
+
+              if (candidateHeight < nextVerticalLimit) {
+                nextVerticalLimit = candidateHeight;
+              }
+            } else if (
+              side === "above" &&
+              blocker.bottom >= rect.yPt + rect.heightPt - 0.01
+            ) {
+              const candidateHeight = Math.max(
+                0,
+                blocker.bottom - verticalClearance - (rect.yPt + rect.heightPt),
+              );
+
+              if (candidateHeight < nextVerticalLimit) {
+                nextVerticalLimit = candidateHeight;
+              }
+            }
           }
         }
 
-        const collidesWithManifestation = placedBoxes.some((blocker) =>
-          boxesOverlap(box, blocker, 0, MANIFESTATION_VERTICAL_CLEARANCE_PT),
-        );
-        const hasCollision =
-          collidesWithManifestation ||
-          otherFieldBoxes.some((blocker) =>
-            boxesOverlap(box, blocker, 0, MANIFESTATION_VERTICAL_CLEARANCE_PT),
-          );
+        const changed =
+          nextRightBound < rightBound - 0.01 ||
+          nextLeftBound > leftBound + 0.01 ||
+          nextVerticalLimit < verticalLimit - 0.01;
 
-        current = {
-          box,
-          collidesWithManifestation,
-          fitsOnPage,
-          hasCollision,
-          lineHeight: layout.lineHeight,
-          lines: layout.lines,
-          size: layout.size,
-          topBaseline,
-          x,
-        };
-
-        if (nextRightBound >= rightBound - 0.01) {
+        if (!changed) {
           break;
         }
 
+        leftBound = nextLeftBound;
+        rightBound = nextRightBound;
+        verticalLimit = nextVerticalLimit;
+      }
+
+      return current;
+    };
+
+    const layoutBeside = (
+      side: "left" | "right",
+      options: {
+        allowVerticalShrink: boolean;
+        verticalClearance?: number;
+      },
+    ): PlacedManifestation | null => {
+      const { allowVerticalShrink } = options;
+      const verticalClearance =
+        options.verticalClearance ?? MANIFESTATION_VERTICAL_CLEARANCE_PT;
+      let leftBound =
+        side === "right"
+          ? rect.xPt + rect.widthPt + MANIFESTATION_GUTTER_PT
+          : margin;
+      let rightBound =
+        side === "right" ? pageRight : rect.xPt - MANIFESTATION_GUTTER_PT;
+
+      if (rightBound - leftBound < 12) {
+        return null;
+      }
+
+      const verticalInset =
+        rect.heightPt > verticalClearance * 3 ? verticalClearance : 0;
+      const bandBottom = Math.max(margin, rect.yPt + verticalInset);
+      const bandTop = Math.min(
+        pageTop,
+        rect.yPt + rect.heightPt - verticalInset,
+      );
+      const availableHeight = bandTop - bandBottom;
+
+      if (availableHeight <= 0) {
+        return null;
+      }
+
+      let current: PlacedManifestation | null = null;
+      const maxPasses = blockers.length + 2;
+
+      for (let pass = 0; pass < maxPasses; pass += 1) {
+        const maxWidth = Math.max(0.5, rightBound - leftBound);
+        const layout = layoutManifestationText(
+          font,
+          text,
+          maxWidth,
+          availableHeight,
+          { allowVerticalShrink },
+        );
+        const descender = layout.size * 0.25;
+        const x =
+          side === "right"
+            ? leftBound
+            : Math.max(leftBound, rightBound - layout.maxLineWidth);
+        const bottomBaseline = bandBottom + descender;
+        const topBaseline =
+          bottomBaseline + (layout.lines.length - 1) * layout.lineHeight;
+        const fitsVertically = topBaseline + layout.size <= bandTop + 0.01;
+
+        current = buildPlacement(x, topBaseline, layout, fitsVertically);
+
+        let nextLeftBound = leftBound;
+        let nextRightBound = rightBound;
+
+        for (const blocker of blockers) {
+          if (
+            !boxesOverlap(
+              current.box,
+              blocker,
+              MANIFESTATION_GUTTER_PT,
+              verticalClearance,
+            )
+          ) {
+            continue;
+          }
+
+          if (side === "right" && blocker.left > leftBound) {
+            const gutter = Math.min(
+              MANIFESTATION_GUTTER_PT,
+              (blocker.left - leftBound) * 0.25,
+            );
+            const candidateRight = blocker.left - gutter;
+
+            if (candidateRight < nextRightBound) {
+              nextRightBound = candidateRight;
+            }
+          } else if (side === "left" && blocker.right < rightBound) {
+            const gutter = Math.min(
+              MANIFESTATION_GUTTER_PT,
+              (rightBound - blocker.right) * 0.25,
+            );
+            const candidateLeft = blocker.right + gutter;
+
+            if (candidateLeft > nextLeftBound) {
+              nextLeftBound = candidateLeft;
+            }
+          }
+        }
+
+        const changed =
+          nextRightBound < rightBound - 0.01 ||
+          nextLeftBound > leftBound + 0.01;
+
+        if (!changed || nextRightBound - nextLeftBound < 4) {
+          break;
+        }
+
+        leftBound = nextLeftBound;
         rightBound = nextRightBound;
       }
 
       return current;
     };
 
-    const below = layoutAtSide("below", false);
+    const below = layoutAtSide("below", { allowVerticalShrink: false });
     let chosen: PlacedManifestation;
 
     if (below.fitsOnPage && !below.hasCollision) {
       chosen = below;
     } else {
-      const above = layoutAtSide("above", false);
+      const above = layoutAtSide("above", { allowVerticalShrink: false });
 
       if (above.fitsOnPage && !above.hasCollision) {
         chosen = above;
-      } else if (below.fitsOnPage && !below.collidesWithManifestation) {
-        chosen = below;
-      } else if (above.fitsOnPage && !above.collidesWithManifestation) {
-        chosen = above;
-      } else if (below.fitsOnPage) {
-        chosen = below;
-      } else if (above.fitsOnPage) {
-        chosen = above;
       } else {
-        chosen = layoutAtSide(
-          spaceBelow >= spaceAbove ? "below" : "above",
-          true,
-        );
+        const belowShifted = layoutAtSide("below", {
+          allowVerticalShrink: false,
+          shiftLeft: true,
+        });
+        const aboveShifted = layoutAtSide("above", {
+          allowVerticalShrink: false,
+          shiftLeft: true,
+        });
+
+        if (belowShifted.fitsOnPage && !belowShifted.hasCollision) {
+          chosen = belowShifted;
+        } else if (aboveShifted.fitsOnPage && !aboveShifted.hasCollision) {
+          chosen = aboveShifted;
+        } else {
+          const verticalFitCandidates = [
+            layoutAtSide("below", {
+              allowVerticalShrink: true,
+              constrainToVerticalBlockers: true,
+            }),
+            layoutAtSide("above", {
+              allowVerticalShrink: true,
+              constrainToVerticalBlockers: true,
+            }),
+            layoutAtSide("below", {
+              allowVerticalShrink: true,
+              constrainToVerticalBlockers: true,
+              shiftLeft: true,
+            }),
+            layoutAtSide("above", {
+              allowVerticalShrink: true,
+              constrainToVerticalBlockers: true,
+              shiftLeft: true,
+            }),
+          ];
+          const besideCandidates = [
+            layoutBeside("right", { allowVerticalShrink: true }),
+            layoutBeside("left", { allowVerticalShrink: true }),
+          ];
+          const readableVertical = pickLargestFittingCandidate(
+            verticalFitCandidates,
+            (candidate) =>
+              candidate.fitsOnPage &&
+              !candidate.hasCollision &&
+              candidate.size >= MANIFESTATION_MIN_READABLE_SIZE_PT,
+          );
+          const readableBeside = readableVertical
+            ? null
+            : pickLargestFittingCandidate(
+                besideCandidates,
+                (candidate) =>
+                  candidate.fitsOnPage &&
+                  !candidate.hasCollision &&
+                  candidate.size >= MANIFESTATION_MIN_READABLE_SIZE_PT,
+              );
+          const anyClear =
+            readableVertical ??
+            readableBeside ??
+            pickLargestFittingCandidate(
+              [...verticalFitCandidates, ...besideCandidates],
+              (candidate) => candidate.fitsOnPage && !candidate.hasCollision,
+            );
+
+          if (anyClear) {
+            chosen = anyClear;
+          } else {
+            const tightCandidates = [
+              layoutAtSide("below", {
+                allowVerticalShrink: true,
+                constrainToVerticalBlockers: true,
+                verticalClearance: 0,
+              }),
+              layoutAtSide("above", {
+                allowVerticalShrink: true,
+                constrainToVerticalBlockers: true,
+                verticalClearance: 0,
+              }),
+              layoutAtSide("below", {
+                allowVerticalShrink: true,
+                constrainToVerticalBlockers: true,
+                shiftLeft: true,
+                verticalClearance: 0,
+              }),
+              layoutAtSide("above", {
+                allowVerticalShrink: true,
+                constrainToVerticalBlockers: true,
+                shiftLeft: true,
+                verticalClearance: 0,
+              }),
+              layoutBeside("right", {
+                allowVerticalShrink: true,
+                verticalClearance: 0,
+              }),
+              layoutBeside("left", {
+                allowVerticalShrink: true,
+                verticalClearance: 0,
+              }),
+            ];
+            const noDirectOverlap = pickLargestFittingCandidate(
+              tightCandidates,
+              (candidate) =>
+                candidate.fitsOnPage && !candidate.hasDirectOverlap,
+            );
+
+            if (noDirectOverlap) {
+              chosen = noDirectOverlap;
+            } else if (below.fitsOnPage && !below.collidesWithManifestation) {
+              chosen = below;
+            } else if (above.fitsOnPage && !above.collidesWithManifestation) {
+              chosen = above;
+            } else if (below.fitsOnPage) {
+              chosen = below;
+            } else if (above.fitsOnPage) {
+              chosen = above;
+            } else {
+              chosen = layoutAtSide(
+                spaceBelow >= spaceAbove ? "below" : "above",
+                { allowVerticalShrink: true },
+              );
+            }
+          }
+        }
       }
     }
 
