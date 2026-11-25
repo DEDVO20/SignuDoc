@@ -24,6 +24,7 @@ services:
 
       EMAIL_DRIVER: ${EMAIL_DRIVER:-capture}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-}
 
       STORAGE_DRIVER: local
       STORAGE_LOCAL_DIR: /app/.data/storage
