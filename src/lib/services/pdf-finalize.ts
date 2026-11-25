@@ -887,72 +887,464 @@ async function drawFieldValue(
   }
 }
 
-/**
- * Prints a Part 11 signature's manifestation just under the signature, or
- * just above it when the field sits at the foot of the page.
- */
-async function stampSignatureManifestation(
-  field: FieldRecord,
-  page: PDFPage,
+const MANIFESTATION_MARGIN_PT = 2;
+const MANIFESTATION_GUTTER_PT = 8;
+const MANIFESTATION_VERTICAL_CLEARANCE_PT = 2;
+const MANIFESTATION_PREFERRED_SIZE_PT = 6.5;
+const MANIFESTATION_MIN_READABLE_SIZE_PT = 5;
+const MANIFESTATION_LAST_RESORT_SIZE_PT = 0.5;
+const MANIFESTATION_LINE_GAP_PT = 1.5;
+
+type PageBox = {
+  bottom: number;
+  left: number;
+  right: number;
+  top: number;
+};
+
+type ManifestationTextLayout = {
+  fitsHeight: boolean;
+  fitsWidth: boolean;
+  lineHeight: number;
+  lines: string[];
+  maxLineWidth: number;
+  size: number;
+};
+
+type PlacedManifestation = {
+  box: PageBox;
+  collidesWithManifestation: boolean;
+  fitsOnPage: boolean;
+  hasCollision: boolean;
+  lineHeight: number;
+  lines: string[];
+  size: number;
+  topBaseline: number;
+  x: number;
+};
+
+type PageManifestationTarget = {
+  field: FieldRecord;
+  rect: { heightPt: number; widthPt: number; xPt: number; yPt: number };
+  text: string;
+};
+
+function rectToPageBox(rect: {
+  heightPt: number;
+  widthPt: number;
+  xPt: number;
+  yPt: number;
+}): PageBox {
+  return {
+    bottom: rect.yPt,
+    left: rect.xPt,
+    right: rect.xPt + rect.widthPt,
+    top: rect.yPt + rect.heightPt,
+  };
+}
+
+function boxesOverlap(
+  left: PageBox,
+  right: PageBox,
+  padX = 0,
+  padY = 0,
+): boolean {
+  return (
+    left.left < right.right + padX &&
+    left.right + padX > right.left &&
+    left.bottom < right.top + padY &&
+    left.top + padY > right.bottom
+  );
+}
+
+function manifestationLineHeight(size: number): number {
+  return size + Math.min(MANIFESTATION_LINE_GAP_PT, size * 0.3);
+}
+
+function manifestationRequiredHeight(lineCount: number, size: number): number {
+  return lineCount * manifestationLineHeight(size) + size * 0.25;
+}
+
+function measureManifestationLayout(
+  font: TextFace,
+  lines: string[],
+  size: number,
+  maxWidth: number,
+  maxHeight: number,
+): ManifestationTextLayout {
+  const lineHeight = manifestationLineHeight(size);
+  const maxLineWidth = lines.reduce(
+    (widest, line) => Math.max(widest, font.widthOfTextAtSize(line, size)),
+    0,
+  );
+
+  return {
+    fitsHeight: manifestationRequiredHeight(lines.length, size) <= maxHeight,
+    fitsWidth: maxLineWidth <= maxWidth,
+    lineHeight,
+    lines,
+    maxLineWidth,
+    size,
+  };
+}
+
+function layoutManifestationText(
   font: TextFace,
   text: string,
-): Promise<void> {
-  const geometry = getDisplayedPageGeometry(page);
+  maxWidth: number,
+  maxHeight: number,
+  options: { allowVerticalShrink?: boolean } = {},
+): ManifestationTextLayout {
+  const allowVerticalShrink = options.allowVerticalShrink ?? false;
+  const parts = text.split(" | ");
 
+  // One line when it fits at a readable size, preserving the single-line
+  // manifestation whenever there is horizontal room.
+  const oneLineSize = fitTextSize(
+    font,
+    text,
+    maxWidth,
+    7,
+    MANIFESTATION_PREFERRED_SIZE_PT,
+  );
+
+  if (oneLineSize >= MANIFESTATION_MIN_READABLE_SIZE_PT) {
+    const candidate = measureManifestationLayout(
+      font,
+      [text],
+      oneLineSize,
+      maxWidth,
+      maxHeight,
+    );
+
+    if (candidate.fitsWidth && (!allowVerticalShrink || candidate.fitsHeight)) {
+      return candidate;
+    }
+  }
+
+  // One line per part (name, UTC time, meaning) when every part fits whole
+  // inside maxWidth at a readable size.
+  const partsSize = Math.min(
+    ...parts.map((part) =>
+      fitTextSize(font, part, maxWidth, 7, MANIFESTATION_PREFERRED_SIZE_PT),
+    ),
+  );
+
+  if (partsSize >= MANIFESTATION_MIN_READABLE_SIZE_PT) {
+    const candidate = measureManifestationLayout(
+      font,
+      parts,
+      partsSize,
+      maxWidth,
+      maxHeight,
+    );
+
+    if (candidate.fitsWidth && (!allowVerticalShrink || candidate.fitsHeight)) {
+      return candidate;
+    }
+  }
+
+  // Wrap each part independently inside maxWidth at the largest readable
+  // size that fits, so long names or narrow columns never overflow or lose
+  // text.
+  let firstWidthFit: ManifestationTextLayout | null = null;
+
+  for (
+    let size = MANIFESTATION_PREFERRED_SIZE_PT;
+    size >= MANIFESTATION_MIN_READABLE_SIZE_PT;
+    size -= 0.5
+  ) {
+    const wrapped = parts.flatMap((part) =>
+      wrapFieldText(font, size, maxWidth, part),
+    );
+    const candidate = measureManifestationLayout(
+      font,
+      wrapped,
+      size,
+      maxWidth,
+      maxHeight,
+    );
+
+    if (candidate.fitsWidth) {
+      if (!firstWidthFit) {
+        firstWidthFit = candidate;
+      }
+
+      if (candidate.fitsHeight) {
+        return candidate;
+      }
+    }
+  }
+
+  if (firstWidthFit && !allowVerticalShrink) {
+    return firstWidthFit;
+  }
+
+  // Last resort: shrink below the readable floor only when a single glyph
+  // exceeds maxWidth or neither side of the field can fit the wrapped block
+  // at a readable size, so nothing is ever clipped or truncated.
+  let fallback =
+    firstWidthFit ??
+    measureManifestationLayout(
+      font,
+      parts.flatMap((part) =>
+        wrapFieldText(font, MANIFESTATION_MIN_READABLE_SIZE_PT, maxWidth, part),
+      ),
+      MANIFESTATION_MIN_READABLE_SIZE_PT,
+      maxWidth,
+      maxHeight,
+    );
+
+  for (
+    let size = MANIFESTATION_MIN_READABLE_SIZE_PT - 0.5;
+    size >= 0.01;
+    size = size > MANIFESTATION_LAST_RESORT_SIZE_PT ? size - 0.5 : size / 2
+  ) {
+    const wrapped = parts.flatMap((part) =>
+      wrapFieldText(font, size, maxWidth, part),
+    );
+    const candidate = measureManifestationLayout(
+      font,
+      wrapped,
+      size,
+      maxWidth,
+      maxHeight,
+    );
+
+    fallback = candidate;
+
+    if (candidate.fitsWidth && (!allowVerticalShrink || candidate.fitsHeight)) {
+      return candidate;
+    }
+  }
+
+  return fallback;
+}
+
+/**
+ * Lays out every Part 11 signature manifestation on one page so neighboring
+ * fields and side-by-side manifestations never overlap each other or run past
+ * the page edge (issue #220).
+ */
+function layoutPageManifestations(
+  targets: readonly PageManifestationTarget[],
+  allFieldBoxes: readonly { box: PageBox; field: FieldRecord }[],
+  geometry: DisplayedPageGeometry,
+  font: TextFace,
+): Map<FieldRecord, PlacedManifestation> {
+  const margin = Math.min(
+    MANIFESTATION_MARGIN_PT,
+    geometry.widthPt / 4,
+    geometry.heightPt / 4,
+  );
+  const pageRight = geometry.widthPt - margin;
+  const pageTop = geometry.heightPt - margin;
+
+  // Rightmost signatures go first so every manifestation to the right has its
+  // final bounding box before a signature to its left computes its available
+  // horizontal width. Ties at the same x run bottom-to-top so a signature
+  // forced above at the foot of the page claims its space before one above it.
+  const ordered = [...targets].sort(
+    (left, right) =>
+      right.rect.xPt - left.rect.xPt ||
+      left.rect.yPt - right.rect.yPt ||
+      (left.field.id ?? "").localeCompare(right.field.id ?? ""),
+  );
+  const placed = new Map<FieldRecord, PlacedManifestation>();
+  const placedBoxes: PageBox[] = [];
+
+  for (const target of ordered) {
+    const { field, rect, text } = target;
+    const otherFieldBoxes = allFieldBoxes
+      .filter((entry) => entry.field !== field)
+      .map((entry) => entry.box);
+    const blockers = [...otherFieldBoxes, ...placedBoxes];
+    const x = Math.max(
+      margin,
+      Math.min(rect.xPt, Math.max(margin, pageRight - 4)),
+    );
+    const spaceBelow = Math.max(0, rect.yPt - margin);
+    const spaceAbove = Math.max(0, pageTop - (rect.yPt + rect.heightPt));
+
+    const layoutAtSide = (
+      side: "below" | "above",
+      allowVerticalShrink: boolean,
+    ): PlacedManifestation => {
+      const availableHeight = side === "below" ? spaceBelow : spaceAbove;
+      let rightBound = pageRight;
+      let current!: PlacedManifestation;
+
+      // Each pass that finds a right-side blocker strictly lowers rightBound
+      // against a finite set of blocker left-edges, so this reaches a fixed
+      // point in at most blockers.length + 1 passes.
+      for (let pass = 0; pass <= blockers.length; pass += 1) {
+        const maxWidth = Math.max(0.5, rightBound - x);
+        const layout = layoutManifestationText(
+          font,
+          text,
+          maxWidth,
+          availableHeight,
+          { allowVerticalShrink },
+        );
+        const descender = layout.size * 0.25;
+        const gap = layout.lineHeight - layout.size;
+        let topBaseline: number;
+        let fitsOnPage: boolean;
+
+        if (side === "below") {
+          topBaseline = rect.yPt - layout.lineHeight;
+          const bottomBaseline =
+            topBaseline - (layout.lines.length - 1) * layout.lineHeight;
+
+          fitsOnPage = bottomBaseline - descender >= margin;
+          if (!fitsOnPage && allowVerticalShrink) {
+            const shiftUp = margin - (bottomBaseline - descender);
+
+            topBaseline = Math.min(
+              topBaseline + shiftUp,
+              pageTop - layout.size,
+            );
+          }
+        } else {
+          const bottomBaseline = rect.yPt + rect.heightPt + gap + descender;
+
+          topBaseline =
+            bottomBaseline + (layout.lines.length - 1) * layout.lineHeight;
+          fitsOnPage = topBaseline + layout.size <= pageTop;
+
+          if (!fitsOnPage) {
+            topBaseline = Math.min(topBaseline, pageTop - layout.size);
+          }
+        }
+
+        const finalBottomBaseline =
+          topBaseline - (layout.lines.length - 1) * layout.lineHeight;
+        const box: PageBox = {
+          bottom: finalBottomBaseline - descender,
+          left: x,
+          right: x + layout.maxLineWidth,
+          top: topBaseline + layout.size,
+        };
+
+        let nextRightBound = rightBound;
+
+        for (const blocker of blockers) {
+          const isRightSideBlocker =
+            blocker.left > x &&
+            (blocker.left >= rect.xPt + rect.widthPt - 1 ||
+              blocker.left - x >= 24);
+
+          if (
+            isRightSideBlocker &&
+            boxesOverlap(
+              box,
+              blocker,
+              MANIFESTATION_GUTTER_PT,
+              MANIFESTATION_VERTICAL_CLEARANCE_PT,
+            )
+          ) {
+            const gutter = Math.min(
+              MANIFESTATION_GUTTER_PT,
+              (blocker.left - x) * 0.25,
+            );
+            const candidateBound = blocker.left - gutter;
+
+            if (candidateBound < nextRightBound) {
+              nextRightBound = candidateBound;
+            }
+          }
+        }
+
+        const collidesWithManifestation = placedBoxes.some((blocker) =>
+          boxesOverlap(box, blocker, 0, MANIFESTATION_VERTICAL_CLEARANCE_PT),
+        );
+        const hasCollision =
+          collidesWithManifestation ||
+          otherFieldBoxes.some((blocker) =>
+            boxesOverlap(box, blocker, 0, MANIFESTATION_VERTICAL_CLEARANCE_PT),
+          );
+
+        current = {
+          box,
+          collidesWithManifestation,
+          fitsOnPage,
+          hasCollision,
+          lineHeight: layout.lineHeight,
+          lines: layout.lines,
+          size: layout.size,
+          topBaseline,
+          x,
+        };
+
+        if (nextRightBound >= rightBound - 0.01) {
+          break;
+        }
+
+        rightBound = nextRightBound;
+      }
+
+      return current;
+    };
+
+    const below = layoutAtSide("below", false);
+    let chosen: PlacedManifestation;
+
+    if (below.fitsOnPage && !below.hasCollision) {
+      chosen = below;
+    } else {
+      const above = layoutAtSide("above", false);
+
+      if (above.fitsOnPage && !above.hasCollision) {
+        chosen = above;
+      } else if (below.fitsOnPage && !below.collidesWithManifestation) {
+        chosen = below;
+      } else if (above.fitsOnPage && !above.collidesWithManifestation) {
+        chosen = above;
+      } else if (below.fitsOnPage) {
+        chosen = below;
+      } else if (above.fitsOnPage) {
+        chosen = above;
+      } else {
+        chosen = layoutAtSide(
+          spaceBelow >= spaceAbove ? "below" : "above",
+          true,
+        );
+      }
+    }
+
+    placed.set(field, chosen);
+    placedBoxes.push(chosen.box);
+  }
+
+  return placed;
+}
+
+/**
+ * Prints a Part 11 signature's manifestation just under the signature, or
+ * just above it when there is no room below.
+ */
+async function stampSignatureManifestation(
+  page: PDFPage,
+  geometry: DisplayedPageGeometry,
+  font: TextFace,
+  placement: PlacedManifestation,
+): Promise<void> {
   await drawOnDisplayedPage(page, geometry, () =>
-    drawSignatureManifestation(field, page, geometry, font, text),
+    drawSignatureManifestation(page, font, placement),
   );
 }
 
 function drawSignatureManifestation(
-  field: FieldRecord,
   page: PDFPage,
-  geometry: DisplayedPageGeometry,
   font: TextFace,
-  text: string,
+  placement: PlacedManifestation,
 ): void {
-  const pageWidth = geometry.widthPt;
-  const rect = normalizedRectToPdfRect(field, geometry);
-  const margin = 2;
-  const fullWidth = pageWidth - margin * 2;
-  const minimumSize = 5;
-  // One line when it fits at a readable size, otherwise one line per part
-  // (name, time, meaning), so nothing is shrunk away or runs off the page.
-  const oneLineSize = fitTextSize(font, text, fullWidth, 7, 6.5);
-  const lines =
-    font.widthOfTextAtSize(text, oneLineSize) <= fullWidth &&
-    oneLineSize >= minimumSize
-      ? [text]
-      : text.split(" | ");
-  const size = Math.max(
-    minimumSize,
-    Math.min(
-      ...lines.map((line) => fitTextSize(font, line, fullWidth, 7, 6.5)),
-    ),
-  );
-  const lineHeight = size + 1.5;
-  const blockHeight = lineHeight * lines.length;
-  const below = rect.yPt - blockHeight;
-  // The top line's baseline. Below the field when there is room, above it
-  // at the foot of the page.
-  const top =
-    below >= margin
-      ? rect.yPt - lineHeight
-      : Math.min(
-          rect.yPt + rect.heightPt + blockHeight - size,
-          geometry.heightPt - size - margin,
-        );
-
-  lines.forEach((line, index) => {
-    const width = font.widthOfTextAtSize(line, size);
-    // Starts under the field, moved left if it would run off the page.
-    const x = Math.max(margin, Math.min(rect.xPt, pageWidth - width - margin));
-
+  placement.lines.forEach((line, index) => {
     font.drawText(page, line, {
       color: rgb(0.2, 0.2, 0.24),
-      size,
-      x,
-      y: top - index * lineHeight,
+      size: placement.size,
+      x: placement.x,
+      y: placement.topBaseline - index * placement.lineHeight,
     });
   });
 }
@@ -1817,6 +2209,15 @@ export async function renderFinalizedEnvelopePdf(
   const storedPages = new Map(
     input.pages.map((page) => [page.pageNumber, page]),
   );
+  const pageManifestations = new Map<
+    number,
+    {
+      allFieldBoxes: Array<{ box: PageBox; field: FieldRecord }>;
+      geometry: DisplayedPageGeometry;
+      page: PDFPage;
+      targets: PageManifestationTarget[];
+    }
+  >();
 
   for (const placedField of stampedFields) {
     const page = pdfDocument.getPage(placedField.page - 1);
@@ -1844,16 +2245,58 @@ export async function renderFinalizedEnvelopePdf(
       geometry,
     );
 
-    const manifestation =
-      field.type === "signature" ? manifestations.get(field.signerId) : null;
+    if (manifestations.size > 0) {
+      let pageContext = pageManifestations.get(placedField.page);
 
-    if (manifestation) {
-      await stampSignatureManifestation(
+      if (!pageContext) {
+        pageContext = {
+          allFieldBoxes: [],
+          geometry,
+          page,
+          targets: [],
+        };
+        pageManifestations.set(placedField.page, pageContext);
+      }
+
+      const rect = normalizedRectToPdfRect(field, geometry);
+
+      pageContext.allFieldBoxes.push({
+        box: rectToPageBox(rect),
         field,
-        page,
-        faces.regular,
-        manifestation,
-      );
+      });
+
+      const manifestation =
+        field.type === "signature" ? manifestations.get(field.signerId) : null;
+
+      if (manifestation) {
+        pageContext.targets.push({ field, rect, text: manifestation });
+      }
+    }
+  }
+
+  for (const pageContext of pageManifestations.values()) {
+    if (pageContext.targets.length === 0) {
+      continue;
+    }
+
+    const placed = layoutPageManifestations(
+      pageContext.targets,
+      pageContext.allFieldBoxes,
+      pageContext.geometry,
+      faces.regular,
+    );
+
+    for (const target of pageContext.targets) {
+      const placement = placed.get(target.field);
+
+      if (placement) {
+        await stampSignatureManifestation(
+          pageContext.page,
+          pageContext.geometry,
+          faces.regular,
+          placement,
+        );
+      }
     }
   }
 
