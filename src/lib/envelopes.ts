@@ -1616,9 +1616,14 @@ function describeChoiceProblem(
  * and on the signed document that can be too small to read. The sender
  * fixes it before sending instead.
  */
-async function findUnreadableDropdown(
-  signers: readonly PersistedSignerRecord[],
-  fields: readonly FieldRecord[],
+export async function findUnreadableDropdown(
+  signers: ReadonlyArray<{ id: string; name: string }>,
+  fields: ReadonlyArray<
+    Pick<
+      FieldRecord,
+      "height" | "options" | "page" | "signerId" | "type" | "width" | "x" | "y"
+    >
+  >,
   pages: Parameters<typeof findTypedValueTooLongForField>[1],
 ): Promise<string | null> {
   for (const field of fields) {
