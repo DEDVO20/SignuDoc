@@ -37,6 +37,7 @@ import {
   parseOptionLines,
 } from "@/lib/field-choices";
 import { getInitials } from "@/lib/initials";
+import { toWellFormedText } from "@/lib/whole-characters";
 import {
   type FieldPlacement,
   type ReplaceFieldsResponse,
@@ -1830,7 +1831,9 @@ function FieldEditor({
               maxLength={MAX_FIELD_OPTION_LENGTH}
               onChange={(event) => {
                 setLabelDraft(event.target.value);
-                onSetLabel(event.target.value.trim() || undefined);
+                onSetLabel(
+                  toWellFormedText(event.target.value).trim() || undefined,
+                );
               }}
               placeholder="Yes"
               value={shownLabel}
