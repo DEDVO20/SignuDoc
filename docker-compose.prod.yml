@@ -1,0 +1,49 @@
+
+services:
+  signudoc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    restart: unless-stopped
+
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      TZ: America/Bogota
+
+      DATABASE_URL: ${DATABASE_URL:?Required}
+
+      APP_URL: https://signudoc.dedvo.win
+      BETTER_AUTH_URL: https://signudoc.dedvo.win
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Required}
+
+      SETUP_TOKEN: ${SETUP_TOKEN:?Required}
+      RETENTION_JOB_SECRET: ${RETENTION_JOB_SECRET:?Required}
+
+      EMAIL_DRIVER: ${EMAIL_DRIVER:-capture}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_DIR: /app/.data/storage
+
+    volumes:
+      - signudoc_storage:/app/.data
+
+    expose:
+      - "3000"
+
+    networks:
+      - dokploy-network
+      - postgres_default
+
+volumes:
+  signudoc_storage:
+
+networks:
+  dokploy-network:
+    external: true
+
+  postgres_default:
+    external: true
