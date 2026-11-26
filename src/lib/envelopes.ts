@@ -299,6 +299,10 @@ type FieldRow = {
   y: number;
 };
 
+// Fields shown in the envelope detail per-signer summary ("N fields assigned"
+// / "N fields completed"). Includes auto-filled Date and Name fields so the
+// count matches Place fields and Review; the signing page's remaining-required
+// counter tracks interactive signer actions separately.
 function shouldCountFieldForSignerSummary(
   field: Pick<FieldRecord, "required" | "type">,
 ): boolean {
@@ -307,6 +311,8 @@ function shouldCountFieldForSignerSummary(
   }
 
   if (
+    field.type === "date" ||
+    field.type === "name" ||
     field.type === "text" ||
     field.type === "number" ||
     field.type === "dropdown"
@@ -1610,9 +1616,14 @@ function describeChoiceProblem(
  * and on the signed document that can be too small to read. The sender
  * fixes it before sending instead.
  */
-async function findUnreadableDropdown(
-  signers: readonly PersistedSignerRecord[],
-  fields: readonly FieldRecord[],
+export async function findUnreadableDropdown(
+  signers: ReadonlyArray<{ id: string; name: string }>,
+  fields: ReadonlyArray<
+    Pick<
+      FieldRecord,
+      "height" | "options" | "page" | "signerId" | "type" | "width" | "x" | "y"
+    >
+  >,
   pages: Parameters<typeof findTypedValueTooLongForField>[1],
 ): Promise<string | null> {
   for (const field of fields) {
@@ -3014,7 +3025,6 @@ export async function sendDraftEnvelope(
   }
 
   const sentAt = Math.floor(Date.now() / 1000);
-  const sentAuditAt = Math.max(sentAt, envelope.createdAt + 1);
   const expiresAt = deadlineFromDays(sentAt, input.expiresInDays);
   const issuedLinks = new Map<string, IssuedSigningLink>();
 
@@ -3201,7 +3211,10 @@ export async function sendDraftEnvelope(
         {
           actorEmail: input.senderEmail,
           actorType: "sender",
-          createdAt: sentAuditAt,
+          // Keep the sent audit timestamp equal to envelopes.sent_at; tied
+          // whole-second events (created, sent, email_sent) stay ordered by
+          // audit_events.sequence rather than bumping sent past email_sent.
+          createdAt: sentAt,
           envelopeId,
           event: "sent",
           ipAddress: input.ipAddress ?? null,
@@ -3355,7 +3368,7 @@ export async function sendDraftEnvelope(
               SELECT max(sequence) FROM audit_events WHERE envelope_id = $1
             )
         `,
-        [envelopeId, sentAuditAt, input.senderEmail],
+        [envelopeId, sentAt, input.senderEmail],
       );
       // The envelope.sent webhook was held for the invitation (see
       // releaseSentWebhook below); it did not go out, so there is nothing
